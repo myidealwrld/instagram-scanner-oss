@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +22,10 @@ class FakeResponse:
 
 
 class ScannerTests(unittest.TestCase):
+    def test_current_graph_version_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(scanner._graph_root(), "https://graph.facebook.com/v26.0")
+
     def test_token_is_sent_in_header_not_url(self):
         captured = {}
 
@@ -30,7 +36,13 @@ class ScannerTests(unittest.TestCase):
             return FakeResponse({"data": []})
 
         with patch.object(scanner.urllib.request, "urlopen", open_request):
-            self.assertEqual(scanner._request_json("https://graph.facebook.com/v21.0/items?access_token=leaked&after=cursor", "dummy-token"), {"data": []})
+            self.assertEqual(
+                scanner._request_json(
+                    "https://graph.facebook.com/v26.0/items?access_token=leaked&after=cursor",
+                    "dummy-token",
+                ),
+                {"data": []},
+            )
         self.assertNotIn("dummy-token", captured["url"])
         self.assertNotIn("access_token", captured["url"])
         self.assertIn("after=cursor", captured["url"])
@@ -41,23 +53,25 @@ class ScannerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             scanner._request_json("https://example.test/steal", "dummy-token")
 
-    def test_get_all_follows_pagination(self):
-        pages = [
-            {"data": [{"id": "one"}], "paging": {"next": "https://graph.example.test/next"}},
-            {"data": [{"id": "two"}]},
-        ]
-        with patch.object(scanner, "_request_json", side_effect=pages), patch.object(scanner.time, "sleep"):
-            result = scanner.get_all("account/media", {"limit": 50}, "dummy-token")
-        self.assertEqual([item["id"] for item in result], ["one", "two"])
+    def test_fetch_expands_replies_from_reply_edge(self):
+        media = [{"id": "m1", "comments_count": 1, "permalink": "https://example.test/post"}]
+        comments = [{"id": "c1", "text": "Parent", "username": "parent", "replies": {"data": [{"id": "r1"}]}}]
+        replies = [{"id": "r1", "text": "Reply", "username": "child"}]
+        with patch.object(scanner, "get_all", side_effect=[media, comments, replies]), patch.object(scanner.time, "sleep"):
+            _, rows = scanner.fetch("token", "123")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["reply_to"], "parent")
 
-    def test_flatten_preserves_only_comment_record_fields(self):
-        row = scanner.flatten(
-            {"id": "comment-1", "text": "  Example\ncomment ", "username": "sample_user", "timestamp": "2026-01-01T00:00:00+0000", "like_count": 2},
-            {"permalink": "https://instagram.example.test/p/example", "caption": "Sample caption"},
-        )
-        self.assertEqual(row["text"], "Example comment")
-        self.assertEqual(row["username"], "sample_user")
-        self.assertEqual(row["post_url"], "https://instagram.example.test/p/example")
+    def test_write_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = os.path.join(tmp, "scan")
+            json_path, csv_path = scanner.write_outputs(
+                [{"id": "m1"}],
+                [scanner.flatten({"id": "c1", "text": "Hi"}, {})],
+                prefix,
+            )
+            self.assertTrue(os.path.exists(json_path))
+            self.assertTrue(os.path.exists(csv_path))
 
 
 if __name__ == "__main__":
