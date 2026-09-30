@@ -1,67 +1,68 @@
 # Instagram Comment Scanner
 
-A small Python CLI that reads comments and replies from media owned by an Instagram Business or Creator account through the Meta Graph API. It does not log in with an Instagram password or store account sessions.
+A dependency-free Python CLI that exports comments and replies from media owned by an authorized Instagram Business or Creator account through Meta's Graph API.
 
 ## Features
 
-- Fetch account media and paginated comments/replies using the Graph API.
-- Export JSON and CSV locally.
-- Configure the access token and numeric account ID through environment variables or CLI options.
-- Send the token in an HTTPS Authorization header rather than a URL query parameter.
+- Fetch account media and paginated comments
+- Follow pagination until exhausted
+- Fetch replies from each comment's replies edge, rather than relying on a truncated embedded reply list
+- Export JSON and CSV locally
+- Use environment variables or CLI arguments for credentials
+- Send tokens in HTTPS Authorization headers, never query strings
+- Supports Meta Graph API hosts `graph.facebook.com` and `graph.instagram.com`
+- Defaults to Graph API `v26.0`, configurable with `IG_GRAPH_VERSION`
 
-## Requirements and installation
+## Requirements
 
-- Python 3.10 or newer
-- An Instagram Business or Creator account linked to a Facebook Page
-- A Meta app and a valid Graph API access token with the Instagram and Pages permissions required by Meta for the account
+- Python 3.10+
+- An Instagram Business or Creator account
+- A Meta app and authorized Graph API token with the permissions required for the account/API configuration
+- Numeric Instagram account ID
 
-No third-party packages are required. Clone/download this directory, then set `IG_ACCESS_TOKEN` and `IG_USER_ID`. `.env.example` contains dummy values only; the script does not automatically load `.env` files.
+No third-party Python packages are required.
 
 ## Quick start
 
 ```sh
-export IG_ACCESS_TOKEN='your-token-in-your-local-shell'
+export IG_ACCESS_TOKEN='your-authorized-token'
 export IG_USER_ID='your-numeric-instagram-account-id'
 python3 ig_fetch_comments.py
 ```
 
-Alternatively, pass `--token` and `--ig-user-id`. Prefer environment variables because command-line arguments may be visible to local process inspection tools.
-
-## Example and expected output
-
-`examples/sample-response.json` and `examples/expected-output.json` are synthetic fixtures, not account data. Run the offline verification with:
+Optional configuration:
 
 ```sh
-python3 -m unittest discover -s tests -v
+export IG_GRAPH_VERSION='v26.0'
+export IG_GRAPH_BASE_URL='https://graph.facebook.com'
 ```
 
-When a real run succeeds, the current directory receives `comments_instagram.json` and, if comments exist, `comments_instagram.csv`.
+For an Instagram Login setup that uses the Instagram Graph host, set `IG_GRAPH_BASE_URL=https://graph.instagram.com` if that matches your Meta app configuration.
 
-## Configuration
+You can also pass `--token`, `--ig-user-id`, and `--output-prefix`. Prefer environment variables for the token because command-line arguments may be visible to local process inspection tools.
 
-| Variable | Meaning |
-| --- | --- |
-| `IG_ACCESS_TOKEN` | Meta Graph API access token |
-| `IG_USER_ID` | Numeric Instagram Business/Creator account ID |
-The token is never printed by the program. Treat downloaded comment text and usernames as personal data.
+## Output
 
-## Architecture
+The scanner writes:
 
-`ig_fetch_comments.py` performs Graph API requests, follows pagination links, flattens replies, and writes local exports. It has no cookie jar, password login, proxy, database, or account-specific configuration.
+- `comments_instagram.json`
+- `comments_instagram.csv` when comments/replies exist
 
-## Development and testing
+Each reply contains `reply_to` with the parent comment username.
+
+## Testing
 
 ```sh
 python3 -m unittest discover -s tests -v
 python3 ig_fetch_comments.py --help
 ```
 
-Tests use mocked Graph API responses. A live account scan was not run in this staging workspace because no access token or account ID was supplied.
+Tests use mocked Graph API responses and do not require credentials.
 
-## Security
+## Security and privacy
 
-Never commit `.env`, access tokens, generated exports, or account data. Revoke tokens that are exposed. Only collect comments for accounts and purposes you are authorized to access, and follow Meta platform terms and applicable privacy law.
+The scanner accepts pagination only from approved HTTPS Meta Graph API hosts and strips any `access_token` query parameter before requests. Never commit tokens, generated exports, or account data. Only collect data you are authorized to access and follow Meta's platform terms and applicable privacy law.
 
-## Licence
+## License
 
 Apache-2.0. See `LICENSE`.
