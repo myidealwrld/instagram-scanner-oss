@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
-"""
-Fetch every comment on your Instagram posts and reels via the Graph API.
+"""Export comments and replies from an authorized Instagram Business/Creator account."""
 
-You need:
-  1. An Instagram Business or Creator account linked to a Facebook Page.
-  2. A Graph API access token with instagram_basic + pages_read_engagement scopes.
-  3. Your Instagram user id (numeric).
-
-How to get the token and id (once, no password shared with anyone):
-  a. Go to developers.facebook.com, create an app (type: Business).
-  b. Open Graph API Explorer, pick your app, and add permissions:
-     instagram_basic, instagram_manage_comments, pages_show_list,
-     pages_read_engagement. Generate the token.
-  c. In the Explorer, run:  me/accounts        -> gives your Page id
-     then:                  {page-id}?fields=instagram_business_account
-                            -> gives your Instagram user id.
-  d. Paste the token and id below, or pass them as arguments:
-       python3 ig_fetch_comments.py --token XXX --ig-user-id 1784...
-
-Output: comments_instagram.json and comments_instagram.csv in this folder.
-Pure standard library, so no pip install needed.
-"""
+from __future__ import annotations
 
 import argparse
 import csv
@@ -29,37 +10,64 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
-GRAPH = "https://graph.facebook.com/v21.0"
+DEFAULT_GRAPH_BASE = "https://graph.facebook.com"
+DEFAULT_GRAPH_VERSION = "v26.0"
+ALLOWED_GRAPH_HOSTS = {"graph.facebook.com", "graph.instagram.com"}
 
 
-def _request_json(url, token):
+def _graph_root() -> str:
+    base = os.environ.get("IG_GRAPH_BASE_URL", DEFAULT_GRAPH_BASE).rstrip("/")
+    version = os.environ.get("IG_GRAPH_VERSION", DEFAULT_GRAPH_VERSION).strip()
+    if not re.fullmatch(r"v\d+\.\d+", version):
+        raise ValueError("IG_GRAPH_VERSION must look like v26.0")
+    parsed = urllib.parse.urlparse(base)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_GRAPH_HOSTS or parsed.port not in (None, 443):
+        raise ValueError("IG_GRAPH_BASE_URL must be an approved HTTPS Meta Graph API host")
+    return f"{base}/{version}"
+
+
+def _request_json(url: str, token: str):
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname != "graph.facebook.com" or parsed.port not in (None, 443):
-        raise ValueError("Refusing to send the access token outside the HTTPS Graph API host")
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_GRAPH_HOSTS or parsed.port not in (None, 443):
+        raise ValueError("Refusing to send the access token outside an approved HTTPS Meta Graph API host")
     safe_query = urllib.parse.urlencode([
         (key, value)
         for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
         if key.casefold() != "access_token"
     ])
-    url = urllib.parse.urlunparse(parsed._replace(query=safe_query))
+    safe_url = urllib.parse.urlunparse(parsed._replace(query=safe_query))
     request = urllib.request.Request(
-        url,
+        safe_url,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        message = f"Meta Graph API HTTP {exc.code}"
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            detail = payload.get("error", {}).get("message") if isinstance(payload, dict) else None
+            if detail:
+                message += f": {detail}"
+        except Exception:
+            pass
+        raise RuntimeError(message) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Meta Graph API request failed: {exc.reason}") from exc
 
 
-def get(path, params, token):
-    url = f"{GRAPH}/{path}?" + urllib.parse.urlencode(params)
+def get(path: str, params: dict, token: str):
+    url = f"{_graph_root()}/{path}?" + urllib.parse.urlencode(params)
     return _request_json(url, token)
 
 
-def get_all(path, params, token):
-    """Follow paging.next until the pages run out."""
+def get_all(path: str, params: dict, token: str):
+    """Follow paging.next until all pages are exhausted."""
     out = []
     data = get(path, params, token)
     while True:
@@ -68,11 +76,25 @@ def get_all(path, params, token):
         if not nxt:
             break
         data = _request_json(nxt, token)
-        time.sleep(0.3)  # be gentle on rate limits
+        time.sleep(0.3)
     return out
 
 
-def fetch(token, ig_user_id):
+def flatten(comment: dict, media: dict, parent: str | None = None):
+    return {
+        "platform": "instagram",
+        "comment_id": comment.get("id", ""),
+        "text": (comment.get("text") or "").replace("\n", " ").strip(),
+        "username": comment.get("username", ""),
+        "timestamp": comment.get("timestamp", ""),
+        "like_count": comment.get("like_count", 0),
+        "reply_to": parent or "",
+        "post_url": media.get("permalink", ""),
+        "post_caption": (media.get("caption") or "").replace("\n", " ")[:120],
+    }
+
+
+def fetch(token: str, ig_user_id: str):
     media = get_all(
         f"{ig_user_id}/media",
         {
@@ -84,68 +106,73 @@ def fetch(token, ig_user_id):
     print(f"Found {len(media)} posts/reels.", file=sys.stderr)
 
     rows = []
-    for i, m in enumerate(media, 1):
-        if not m.get("comments_count"):
+    for i, item in enumerate(media, 1):
+        if not item.get("comments_count"):
             continue
         comments = get_all(
-            f"{m['id']}/comments",
+            f"{item['id']}/comments",
             {
-                "fields": "id,text,username,timestamp,like_count,replies{text,username,timestamp,like_count}",
+                "fields": "id,text,username,timestamp,like_count,replies.limit(1){id}",
                 "limit": 50,
             },
             token,
         )
-        for c in comments:
-            rows.append(flatten(c, m))
-            for rep in c.get("replies", {}).get("data", []):
-                rows.append(flatten(rep, m, parent=c.get("username")))
-        print(f"  [{i}/{len(media)}] {len(comments)} comments on {m.get('permalink','')}",
-              file=sys.stderr)
+        reply_count = 0
+        for comment in comments:
+            rows.append(flatten(comment, item))
+            if comment.get("replies"):
+                replies = get_all(
+                    f"{comment['id']}/replies",
+                    {"fields": "id,text,username,timestamp,like_count", "limit": 50},
+                    token,
+                )
+                reply_count += len(replies)
+                for reply in replies:
+                    rows.append(flatten(reply, item, parent=comment.get("username")))
+        print(
+            f"  [{i}/{len(media)}] {len(comments)} comments + {reply_count} replies on {item.get('permalink','')}",
+            file=sys.stderr,
+        )
         time.sleep(0.3)
     return media, rows
 
 
-def flatten(c, m, parent=None):
-    return {
-        "platform": "instagram",
-        "comment_id": c.get("id", ""),
-        "text": (c.get("text") or "").replace("\n", " ").strip(),
-        "username": c.get("username", ""),
-        "timestamp": c.get("timestamp", ""),
-        "like_count": c.get("like_count", 0),
-        "reply_to": parent or "",
-        "post_url": m.get("permalink", ""),
-        "post_caption": (m.get("caption") or "").replace("\n", " ")[:120],
-    }
+def write_outputs(media, rows, output_prefix="comments_instagram"):
+    json_path = f"{output_prefix}.json"
+    csv_path = f"{output_prefix}.csv"
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump({"media": media, "comments": rows}, handle, ensure_ascii=False, indent=2)
+    if rows:
+        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        return json_path, csv_path
+    return json_path, None
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--token", default=os.environ.get("IG_ACCESS_TOKEN"), help="Meta Graph API token (prefer IG_ACCESS_TOKEN environment variable)")
-    ap.add_argument("--ig-user-id", default=os.environ.get("IG_USER_ID"), help="Numeric Instagram Business/Creator account ID (or IG_USER_ID environment variable)")
-    args = ap.parse_args()
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Export comments and replies from an authorized Instagram account")
+    parser.add_argument("--token", default=os.environ.get("IG_ACCESS_TOKEN"), help="Meta Graph API token; prefer IG_ACCESS_TOKEN")
+    parser.add_argument("--ig-user-id", default=os.environ.get("IG_USER_ID"), help="Numeric Instagram Business/Creator account ID")
+    parser.add_argument("--output-prefix", default="comments_instagram")
+    args = parser.parse_args(argv)
 
     if not args.token or not args.ig_user_id:
-        print("Set IG_ACCESS_TOKEN and IG_USER_ID, or pass --token and --ig-user-id.", file=sys.stderr)
-        sys.exit(1)
+        parser.error("Set IG_ACCESS_TOKEN and IG_USER_ID, or pass --token and --ig-user-id")
     if not re.fullmatch(r"\d+", args.ig_user_id):
-        print("IG_USER_ID must contain only digits.", file=sys.stderr)
-        sys.exit(2)
+        parser.error("IG_USER_ID must contain only digits")
 
-    media, rows = fetch(args.token, args.ig_user_id)
+    try:
+        media, rows = fetch(args.token, args.ig_user_id)
+        json_path, csv_path = write_outputs(media, rows, args.output_prefix)
+    except (RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
 
-    with open("comments_instagram.json", "w", encoding="utf-8") as f:
-        json.dump({"media": media, "comments": rows}, f, ensure_ascii=False, indent=2)
-
-    if rows:
-        with open("comments_instagram.csv", "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            w.writeheader()
-            w.writerows(rows)
-
-    print(f"\nSaved {len(rows)} comments to comments_instagram.json / .csv",
-          file=sys.stderr)
+    suffix = f" and {csv_path}" if csv_path else ""
+    print(f"\nSaved {len(rows)} comments/replies to {json_path}{suffix}", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
