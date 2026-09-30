@@ -1,0 +1,11 @@
+{
+  "platform": "instagram",
+  "comment_id": "sample-comment-001",
+  "text": "Example comment text",
+  "username": "sample_user",
+  "timestamp": "2026-01-01T00:00:00+0000",
+  "like_count": 2,
+  "reply_to": "",
+  "post_url": "https://instagram.example.test/p/example",
+  "post_caption": "Example post caption"
+}

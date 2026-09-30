@@ -1,0 +1,6 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+comments_instagram.json
+comments_instagram.csv
